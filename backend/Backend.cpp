@@ -16,6 +16,7 @@
 
 #include "Backend.h"
 
+#include <algorithm>
 #include <climits>
 
 #include "BackendManager.h"
@@ -60,9 +61,26 @@ HWC2::Error Backend::ValidateDisplay(HwcDisplay *display, uint32_t *num_types,
   if (testing_needed &&
       display->CreateComposition(a_args) != HWC2::Error::None) {
     ++display->total_stats().failed_kms_validate_;
-    client_start = 0;
-    client_size = layers.size();
-    MarkValidated(layers, 0, client_size);
+
+    /*
+     * The driver does not take these planes, for a reason only it knows, such
+     * as the number of blending stages left over a bottom plane that does not
+     * cover the screen. Have the client compose one more layer at a time,
+     * from the bottom ones on, until it does: giving up on all the planes at
+     * once costs the GPU a full composition of each frame.
+     */
+    if (client_size == 0)
+      client_start = 0;
+    while (client_size < layers.size()) {
+      if (client_start > 0)
+        client_start--;
+      client_size++;
+
+      MarkValidated(layers, client_start, client_size);
+      if (client_size == layers.size() ||
+          display->CreateComposition(a_args) == HWC2::Error::None)
+        break;
+    }
   }
 
   *num_types = client_size;
@@ -94,7 +112,24 @@ bool Backend::IsClientLayer(HwcDisplay *display, HwcLayer *layer) {
   return !HardwareSupportsLayerType(layer->GetSfType()) ||
          !layer->IsLayerUsableAsDevice() || display->CtmByGpu() ||
          (layer->GetLayerData().pi.RequireScalingOrPhasing() &&
-          display->GetHwc2()->GetResMan().ForcedScalingWithGpu());
+          display->GetHwc2()->GetResMan().ForcedScalingWithGpu()) ||
+         !AnyPlaneTakesLayer(display, layer);
+}
+
+/*
+ * A layer no plane can show, such as one rotated by 90 degrees on hardware that
+ * cannot rotate, would fail the test commit, and all the layers would then go
+ * to the client. Have only this one composed by the client instead.
+ */
+bool Backend::AnyPlaneTakesLayer(HwcDisplay *display, HwcLayer *layer) {
+  auto &layer_data = layer->GetLayerData();
+  if (!layer_data.bi)
+    return true;
+
+  auto planes = display->GetPipe().GetUsablePlanes();
+  return std::any_of(planes.begin(), planes.end(), [&](const auto &plane) {
+    return plane->Get()->IsValidForLayer(&layer_data);
+  });
 }
 
 bool Backend::HardwareSupportsLayerType(HWC2::Composition comp_type) {

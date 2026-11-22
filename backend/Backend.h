@@ -31,6 +31,7 @@ class Backend {
 
  protected:
   static bool HardwareSupportsLayerType(HWC2::Composition comp_type);
+  static bool AnyPlaneTakesLayer(HwcDisplay *display, HwcLayer *layer);
   static uint32_t CalcPixOps(const std::vector<HwcLayer *> &layers,
                              size_t first_z, size_t size);
   static void MarkValidated(std::vector<HwcLayer *> &layers,
